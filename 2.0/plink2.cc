@@ -35,6 +35,7 @@
 #include "plink2_filter.h"
 #include "plink2_glm.h"
 #include "plink2_glm_shared.h"
+#include "plink2_hap_ibd.h"
 #include "plink2_help.h"
 #include "plink2_import.h"
 #include "plink2_import_legacy.h"
@@ -224,7 +225,8 @@ FLAGSET64_DEF_START()
   kfCommand1Vcor = (1 << 29),
   kfCommand1PhenoSvd = (1 << 30),
   kfCommand1CheckOrImputeSex = (1U << 31),
-  kfCommand1MendelReport = (1LLU << 32)
+  kfCommand1MendelReport = (1LLU << 32),
+  kfCommand1HapIbd = (1LLU << 33)
 FLAGSET64_DEF_END(Command1Flags);
 
 void PgenInfoPrint(const char* pgenname, const PgenFileInfo* pgfip, PgenExtensionLl* header_exts, PgenHeaderCtrl header_ctrl, uint32_t max_allele_ct) {
@@ -421,6 +423,7 @@ typedef struct Plink2CmdlineStruct {
   GwasSsfInfo gwas_ssf_info;
   ClumpInfo clump_info;
   VcorInfo vcor_info;
+  HapIbdInfo hap_ibd_info;
   PhenoSvdInfo pheno_svd_info;
   CheckSexInfo check_sex_info;
   MendelInfo mendel_info;
@@ -552,7 +555,7 @@ typedef struct Plink2CmdlineStruct {
 
 // er, probably time to just always initialize this...
 uint32_t SingleVariantLoaderIsNeeded(const char* king_cutoff_fprefix, Command1Flags command_flags1, MakePlink2Flags make_plink2_flags, RmDupMode rmdup_mode, double hwe_ln_thresh) {
-  return (command_flags1 & (kfCommand1Exportf | kfCommand1MakeKing | kfCommand1GenoCounts | kfCommand1LdPrune | kfCommand1Validate | kfCommand1Pca | kfCommand1MakeRel | kfCommand1Glm | kfCommand1Score | kfCommand1Ld | kfCommand1Hardy | kfCommand1Sdiff | kfCommand1PgenDiff | kfCommand1Clump | kfCommand1Vcor)) ||
+  return (command_flags1 & (kfCommand1Exportf | kfCommand1MakeKing | kfCommand1GenoCounts | kfCommand1LdPrune | kfCommand1Validate | kfCommand1Pca | kfCommand1MakeRel | kfCommand1Glm | kfCommand1Score | kfCommand1Ld | kfCommand1Hardy | kfCommand1Sdiff | kfCommand1PgenDiff | kfCommand1Clump | kfCommand1Vcor | kfCommand1HapIbd)) ||
     ((command_flags1 & kfCommand1MakePlink2) && (make_plink2_flags & kfMakePgen)) ||
     ((command_flags1 & kfCommand1KingCutoff) && (!king_cutoff_fprefix)) ||
     (rmdup_mode != kRmDup0) ||
@@ -2969,6 +2972,18 @@ PglErr Plink2Core(const Plink2Cmdline* pcp, MakePlink2Flags make_plink2_flags, c
         }
       }
 
+      if (pcp->command_flags1 & kfCommand1HapIbd) {
+        if (unlikely(vpos_sortstatus & kfUnsortedVarBp)) {
+          logerrputs("Error: --hap-ibd requires a sorted .pvar/.bim.  Retry this command after\nusing --make-pgen/--make-bed + --sort-vars to sort your data.\n");
+          goto Plink2Core_ret_INCONSISTENT_INPUT;
+        }
+        const uint32_t hap_ibd_thread_ct = pcp->hap_ibd_info.thread_ct ? pcp->hap_ibd_info.thread_ct : pcp->max_thread_ct;
+        reterr = CalcHapIbd(sample_include, &pii.sii, variant_include, cip, variant_bps, variant_cms, allele_freqs, &(pcp->hap_ibd_info), raw_sample_ct, sample_ct, raw_variant_ct, variant_ct, hap_ibd_thread_ct, &pgfi, &simple_pgr, outname, outname_end);
+        if (unlikely(reterr)) {
+          goto Plink2Core_ret_1;
+        }
+      }
+
       if (pcp->command_flags1 & kfCommand1Score) {
         reterr = ScoreReport(sample_include, &pii.sii, sex_nm, sex_male, pheno_cols, pheno_names, variant_include, cip, variant_ids, allele_idx_offsets, allele_storage, allele_freqs, &(pcp->score_info), pcp->output_missing_pheno, raw_sample_ct, sample_ct, nosex_ct, pheno_ct, max_pheno_name_blen, raw_variant_ct, variant_ct, max_variant_id_slen, pcp->xchr_model, pcp->max_thread_ct, &simple_pgr, outname, outname_end);
         if (unlikely(reterr)) {
@@ -3635,6 +3650,7 @@ int main(int argc, char** argv) {
   InitGwasSsf(&pc.gwas_ssf_info);
   InitClump(&pc.clump_info);
   InitVcor(&pc.vcor_info);
+  InitHapIbd(&pc.hap_ibd_info);
   InitPhenoSvd(&pc.pheno_svd_info);
   InitCheckSex(&pc.check_sex_info);
   InitMendel(&pc.mendel_info);
@@ -6983,7 +6999,206 @@ int main(int argc, char** argv) {
         break;
 
       case 'h':
-        if (strequal_k_unsafe(flagname_p2, "ardy")) {
+        if (strequal_k_unsafe(flagname_p2, "ap-ibd")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 0, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (param_ct) {
+            const char* cur_modif = argvk[arg_idx + 1];
+            const uint32_t cur_modif_slen = strlen(cur_modif);
+            if (strequal_k(cur_modif, "pbwt", cur_modif_slen)) {
+              pc.hap_ibd_info.method = kHapIbdMethodPbwt;
+            } else if (strequal_k(cur_modif, "pbwt-adaptive", cur_modif_slen)) {
+              pc.hap_ibd_info.method = kHapIbdMethodPbwtAdaptive;
+            } else if (likely(strequal_k(cur_modif, "pbwt-hmm", cur_modif_slen))) {
+              pc.hap_ibd_info.method = kHapIbdMethodPbwtHmm;
+            } else {
+              snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd method '%s'.\n", cur_modif);
+              goto main_ret_INVALID_CMDLINE_WWA;
+            }
+          }
+          pc.command_flags1 |= kfCommand1HapIbd;
+          pc.dependency_flags |= kfFilterAllReq;
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-cm")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          reterr = AllocFname(argvk[arg_idx + 1], flagname_p, &pc.hap_ibd_info.cm_map_fname);
+          if (unlikely(reterr)) {
+            goto main_ret_1;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-diag")) {
+          pc.hap_ibd_info.flags |= kfHapIbdDiag;
+          goto main_param_zero;
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-err-rate")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          const char* cur_modif = argvk[arg_idx + 1];
+          if (unlikely((!ScantokDouble(cur_modif, &pc.hap_ibd_info.err_rate)) ||
+                       (pc.hap_ibd_info.err_rate < 0.0) ||
+                       (pc.hap_ibd_info.err_rate >= 1.0))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-err-rate argument '%s'.\n", cur_modif);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-extend")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          const char* cur_modif = argvk[arg_idx + 1];
+          const uint32_t cur_modif_slen = strlen(cur_modif);
+          if (strequal_k(cur_modif, "diploid", cur_modif_slen)) {
+            pc.hap_ibd_info.flags |= kfHapIbdExtendDiploid;
+          } else if (strequal_k(cur_modif, "haploid", cur_modif_slen)) {
+            pc.hap_ibd_info.flags &= ~kfHapIbdExtendDiploid;
+          } else {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-extend argument '%s'.\n", cur_modif);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-maf-cap")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          const char* cur_modif = argvk[arg_idx + 1];
+          if (unlikely((!ScantokDouble(cur_modif, &pc.hap_ibd_info.maf_cap)) ||
+                       (pc.hap_ibd_info.maf_cap <= 0.0) ||
+                       (pc.hap_ibd_info.maf_cap > 0.5))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-maf-cap argument '%s'.\n", cur_modif);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-max-err")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ScanUintDefcapx(argvk[arg_idx + 1], &pc.hap_ibd_info.max_err))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-max-err argument '%s'.\n", argvk[arg_idx + 1]);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-max-gap")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ScanPosintDefcapx(argvk[arg_idx + 1], &pc.hap_ibd_info.max_gap))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-max-gap argument '%s'.\n", argvk[arg_idx + 1]);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-min-cm")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          const char* cur_modif = argvk[arg_idx + 1];
+          if (unlikely((!ScantokDouble(cur_modif, &pc.hap_ibd_info.min_cm)) ||
+                       (pc.hap_ibd_info.min_cm < 0.0))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-min-cm argument '%s'.\n", cur_modif);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-min-kin")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          const char* cur_modif = argvk[arg_idx + 1];
+          if (unlikely((!ScantokDouble(cur_modif, &pc.hap_ibd_info.min_kin)) ||
+                       (pc.hap_ibd_info.min_kin > 0.5))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-min-kin argument '%s'.\n", cur_modif);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-min-l")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ScanPosintDefcapx(argvk[arg_idx + 1], &pc.hap_ibd_info.min_l_bp))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-min-l argument '%s'.\n", argvk[arg_idx + 1]);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-min-snp")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ScanPosintDefcapx(argvk[arg_idx + 1], &pc.hap_ibd_info.min_snp))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-min-snp argument '%s'.\n", argvk[arg_idx + 1]);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-out-fmt")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          const char* cur_modif = argvk[arg_idx + 1];
+          // Clear default output format when user specifies explicitly
+          pc.hap_ibd_info.flags &= ~kfHapIbdOutFmtMask;
+          // Parse '+'-delimited format tokens (e.g. "segments+summary")
+          const char* token_iter = cur_modif;
+          while (1) {
+            const char* token_end = token_iter;
+            while (*token_end && *token_end != '+') {
+              ++token_end;
+            }
+            const uint32_t token_slen = token_end - token_iter;
+            if (strequal_k(token_iter, "segments", token_slen)) {
+              pc.hap_ibd_info.flags |= kfHapIbdOutFmtSegments;
+            } else if (strequal_k(token_iter, "summary", token_slen)) {
+              pc.hap_ibd_info.flags |= kfHapIbdOutFmtSummary;
+            } else if (strequal_k(token_iter, "matrix", token_slen)) {
+              pc.hap_ibd_info.flags |= kfHapIbdOutFmtMatrix;
+            } else if (strequal_k(token_iter, "sparse", token_slen)) {
+              pc.hap_ibd_info.flags |= kfHapIbdOutFmtSparse;
+            } else {
+              snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-out-fmt token '%.*s'.\n", token_slen, token_iter);
+              goto main_ret_INVALID_CMDLINE_WWA;
+            }
+            if (!(*token_end)) {
+              break;
+            }
+            token_iter = token_end + 1;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-seed-len")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ScanPosintDefcapx(argvk[arg_idx + 1], &pc.hap_ibd_info.seed_len))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-seed-len argument '%s'.\n", argvk[arg_idx + 1]);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-seg-buf")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ScanPosintDefcapx(argvk[arg_idx + 1], &pc.hap_ibd_info.seg_buf_size))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-seg-buf argument '%s'.\n", argvk[arg_idx + 1]);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-threads")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ScanPosintDefcapx(argvk[arg_idx + 1], &pc.hap_ibd_info.thread_ct))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-threads argument '%s'.\n", argvk[arg_idx + 1]);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-trim")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          if (unlikely(ScanPosintDefcapx(argvk[arg_idx + 1], &pc.hap_ibd_info.trim_bp))) {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-trim argument '%s'.\n", argvk[arg_idx + 1]);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ap-ibd-which")) {
+          if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 1, 1))) {
+            goto main_ret_INVALID_CMDLINE_2A;
+          }
+          const char* cur_modif = argvk[arg_idx + 1];
+          const uint32_t cur_modif_slen = strlen(cur_modif);
+          if (strequal_k(cur_modif, "ibd1", cur_modif_slen)) {
+            pc.hap_ibd_info.flags = (pc.hap_ibd_info.flags & ~kfHapIbdWhichBoth) | kfHapIbdWhichIbd1;
+          } else if (strequal_k(cur_modif, "ibd2", cur_modif_slen)) {
+            pc.hap_ibd_info.flags = (pc.hap_ibd_info.flags & ~kfHapIbdWhichBoth) | kfHapIbdWhichIbd2;
+          } else if (likely(strequal_k(cur_modif, "both", cur_modif_slen))) {
+            pc.hap_ibd_info.flags |= kfHapIbdWhichBoth;
+          } else {
+            snprintf(g_logbuf, kLogbufSize, "Error: Invalid --hap-ibd-which argument '%s'.\n", cur_modif);
+            goto main_ret_INVALID_CMDLINE_WWA;
+          }
+        } else if (strequal_k_unsafe(flagname_p2, "ardy")) {
           if (unlikely(EnforceParamCtRange(argvk[arg_idx], param_ct, 0, 5))) {
             goto main_ret_INVALID_CMDLINE_2A;
           }
@@ -13527,6 +13742,7 @@ int main(int argc, char** argv) {
   CleanupFlip(&pc.flip_info);
   CleanupPermConfig(&pc.perm_config);
   CleanupVcor(&pc.vcor_info);
+  CleanupHapIbd(&pc.hap_ibd_info);
   CleanupClump(&pc.clump_info);
   CleanupGwasSsf(&pc.gwas_ssf_info);
   CleanupExportf(&pc.exportf_info);

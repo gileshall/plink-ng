@@ -98,6 +98,7 @@ CCSRC = $(PLINK2LIB_CCSRC) \
         plink2_glm_linear.cc \
         plink2_glm_logistic.cc \
         plink2_glm_shared.cc \
+        plink2_hap_ibd.cc \
         plink2_help.cc \
         plink2_import.cc \
         plink2_import_legacy.cc \
